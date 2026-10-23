@@ -5,7 +5,10 @@
 #include <math.h>
 
 // Размер игрового поля (50x50) и условие победы (5 в ряд)
+// SIZE можно переопределить при сборке (-DSIZE=...), это нужно бенчмарку
+#ifndef SIZE
 #define SIZE 50
+#endif
 #define WIN 5
 // Размер одной клетки в пикселях
 #define CELL_SIZE 20
@@ -128,7 +131,7 @@ int is_full() {
 
 // Лёгкий режим бота
 void bot_easy() {
-    int empty[2500][2];
+    static int empty[SIZE * SIZE][2];
     int cnt = 0;
 
     for (int i = 0; i < SIZE; i++)
