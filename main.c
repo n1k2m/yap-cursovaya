@@ -1,6 +1,7 @@
 #include <GLFW/glfw3.h>
 #include <stb_easy_font.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <math.h>
 
@@ -17,6 +18,15 @@
 
 // board[x][y]: 0 - пусто, 1 - X (человек), -1 - O (бот/второй игрок)
 int board[SIZE][SIZE];
+
+// Структуры, которые обновляются при каждом ходе, чтобы бот не сканировал всё поле.
+// Индекс клетки idx = x * SIZE + y - это порядок обхода исходных циклов for i, for j.
+int stoneCount = 0;                  // число фишек на поле
+int near1[SIZE][SIZE];               // число фишек в квадрате 3x3 с центром в клетке
+int near2[SIZE][SIZE];               // число фишек в квадрате 5x5 с центром в клетке
+int cand[SIZE * SIZE];               // пустые клетки с near2 > 0, по возрастанию индекса
+int candCount = 0;
+int stoneList[SIZE * SIZE];          // занятые клетки, по возрастанию индекса
 int turn = 1;
 int gameMode = 1;
 int botLevel = 2;
@@ -88,8 +98,13 @@ void draw_circle(float cx, float cy, float radius, float r, float g, float b) {
 void init_board() {
     // Полная очистка поля и сброс состояния партии
     for (int i = 0; i < SIZE; i++)
-        for (int j = 0; j < SIZE; j++)
+        for (int j = 0; j < SIZE; j++) {
             board[i][j] = 0;
+            near1[i][j] = 0;
+            near2[i][j] = 0;
+        }
+    stoneCount = 0;
+    candCount = 0;
 
     turn = 1;
     gameOver = 0;
@@ -123,30 +138,73 @@ int check_win(int x, int y, int player) {
 
 // Проверка заполнено ли поле полностью (ничья)
 int is_full() {
-    for (int i = 0; i < SIZE; i++)
-        for (int j = 0; j < SIZE; j++)
-            if (board[i][j] == 0) return 0;
-    return 1;
+    return stoneCount == SIZE * SIZE;
+}
+
+// Позиция первого элемента >= value в отсортированном массиве (бинарный поиск)
+int lower_bound(const int* a, int n, int value) {
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (a[mid] < value) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+// Вставляет value в отсортированный массив
+void sorted_insert(int* a, int* n, int value) {
+    int pos = lower_bound(a, *n, value);
+    memmove(a + pos + 1, a + pos, (*n - pos) * sizeof(int));
+    a[pos] = value;
+    (*n)++;
+}
+
+// Удаляет value из отсортированного массива, если он там есть
+void sorted_remove(int* a, int* n, int value) {
+    int pos = lower_bound(a, *n, value);
+    if (pos == *n || a[pos] != value) return;
+    memmove(a + pos, a + pos + 1, (*n - pos - 1) * sizeof(int));
+    (*n)--;
+}
+
+// Ставит фишку и обновляет счётчики соседей и список кандидатов.
+// Меняется только окрестность 5x5 вокруг хода, поэтому обновление O(1) по размеру поля
+void set_stone(int x, int y, int player) {
+    int idx = x * SIZE + y;
+    board[x][y] = player;
+    if (near2[x][y] > 0) sorted_remove(cand, &candCount, idx);
+    int n = stoneCount;
+    sorted_insert(stoneList, &n, idx);
+    stoneCount = n;
+
+    for (int dx = -2; dx <= 2; dx++) {
+        for (int dy = -2; dy <= 2; dy++) {
+            int nx = x + dx;
+            int ny = y + dy;
+            if (nx < 0 || nx >= SIZE || ny < 0 || ny >= SIZE) continue;
+            if (abs(dx) <= 1 && abs(dy) <= 1) near1[nx][ny]++;
+            near2[nx][ny]++;
+            if (near2[nx][ny] == 1 && board[nx][ny] == 0)
+                sorted_insert(cand, &candCount, nx * SIZE + ny);
+        }
+    }
 }
 
 // Лёгкий режим бота
 void bot_easy() {
-    static int empty[SIZE * SIZE][2];
-    int cnt = 0;
-
-    for (int i = 0; i < SIZE; i++)
-        for (int j = 0; j < SIZE; j++)
-            if (board[i][j] == 0) {
-                empty[cnt][0] = i;
-                empty[cnt][1] = j;
-                cnt++;
-            }
+    int cnt = SIZE * SIZE - stoneCount;
 
     if (cnt > 0) {
+        // r-я по счёту пустая клетка в порядке обхода поля:
+        // проходим занятые клетки по возрастанию и сдвигаем позицию за каждую
         int r = rand() % cnt;
-        int x = empty[r][0];
-        int y = empty[r][1];
-        board[x][y] = -1;
+        int pos = r;
+        for (int k = 0; k < stoneCount && stoneList[k] <= pos; k++)
+            pos++;
+        int x = pos / SIZE;
+        int y = pos % SIZE;
+        set_stone(x, y, -1);
         if (check_win(x, y, -1)) {
             winner = -1;
             gameOver = 1;
@@ -187,65 +245,66 @@ int longest_line_after_move(int x, int y, int player) {
     return best;
 }
 
-// Проверяет, есть ли рядом с клеткой хоть одна занятая клетка в радиусе
-int has_neighbor(int x, int y, int radius) {
-    for (int dx = -radius; dx <= radius; dx++) {
-        for (int dy = -radius; dy <= radius; dy++) {
-            if (dx == 0 && dy == 0) continue;
-            int nx = x + dx;
-            int ny = y + dy;
-            if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE && board[nx][ny] != 0)
-                return 1;
-        }
-    }
-    return 0;
-}
-
 // Ставит фишку в (x, y) и проверяет победу
 void place_bot_at(int x, int y) {
-    board[x][y] = -1;
+    set_stone(x, y, -1);
     if (check_win(x, y, -1)) {
         winner = -1;
         gameOver = 1;
     }
 }
 
+// Ищет среди кандидатов первый в порядке обхода поля выигрышный ход бота
+// и первый ход, блокирующий победу игрока (-1, если такого нет).
+// Победный ход и блок всегда стоят рядом с фишкой, поэтому они есть среди кандидатов
+void find_win_and_block(int* winIdx, int* blockIdx) {
+    *winIdx = -1;
+    *blockIdx = -1;
+    for (int k = 0; k < candCount; k++) {
+        int idx = cand[k];
+        int i = idx / SIZE, j = idx % SIZE;
+        if (move_wins(i, j, -1)) {
+            *winIdx = idx;
+            return;
+        }
+        if (*blockIdx == -1 && move_wins(i, j, 1))
+            *blockIdx = idx;
+    }
+}
+
 // Средний режим бота
 void bot_medium() {
-    for (int i = 0; i < SIZE; i++)
-        for (int j = 0; j < SIZE; j++)
-            if (board[i][j] == 0 && move_wins(i, j, -1)) {
-                place_bot_at(i, j);
-                return;
-            }
+    int winIdx, blockIdx;
+    find_win_and_block(&winIdx, &blockIdx);
+    if (winIdx != -1) {
+        place_bot_at(winIdx / SIZE, winIdx % SIZE);
+        return;
+    }
+    if (blockIdx != -1) {
+        place_bot_at(blockIdx / SIZE, blockIdx % SIZE);
+        return;
+    }
 
-    for (int i = 0; i < SIZE; i++)
-        for (int j = 0; j < SIZE; j++)
-            if (board[i][j] == 0 && move_wins(i, j, 1)) {
-                place_bot_at(i, j);
-                return;
-            }
-
+    // Кандидаты обходятся в том же порядке, что и клетки в исходном цикле,
+    // поэтому rand() вызывается для тех же клеток и бот ходит так же
     int bestX = -1, bestY = -1, bestScore = -1000000;
-    for (int i = 0; i < SIZE; i++) {
-        for (int j = 0; j < SIZE; j++) {
-            if (board[i][j] != 0) continue;
-            if (!has_neighbor(i, j, 1)) continue;
+    for (int k = 0; k < candCount; k++) {
+        int i = cand[k] / SIZE, j = cand[k] % SIZE;
+        if (near1[i][j] == 0) continue;
 
-            board[i][j] = -1;
-            int attack = longest_line_after_move(i, j, -1);
-            board[i][j] = 0;
+        board[i][j] = -1;
+        int attack = longest_line_after_move(i, j, -1);
+        board[i][j] = 0;
 
-            board[i][j] = 1;
-            int defend = longest_line_after_move(i, j, 1);
-            board[i][j] = 0;
+        board[i][j] = 1;
+        int defend = longest_line_after_move(i, j, 1);
+        board[i][j] = 0;
 
-            int score = attack * 10 + defend * 7 + (rand() % 5);
-            if (score > bestScore) {
-                bestScore = score;
-                bestX = i;
-                bestY = j;
-            }
+        int score = attack * 10 + defend * 7 + (rand() % 5);
+        if (score > bestScore) {
+            bestScore = score;
+            bestX = i;
+            bestY = j;
         }
     }
 
@@ -311,65 +370,58 @@ void bot_hard() {
 
     int center = SIZE / 2;
 
-    // Проверка мгновенной победы
-    for (int i = 0; i < SIZE; i++) {
-        for (int j = 0; j < SIZE; j++) {
-            if (board[i][j] == 0 && move_wins(i, j, -1)) {
-                place_bot_at(i, j);
-                return;
-            }
+    // Один проход по кандидатам (пустые клетки в радиусе 2 от фишек) вместо трёх по всему полю.
+    // Приоритет как в исходной версии: победа, затем блок, затем лучшая оценка
+    int winIdx = -1;
+    int blockIdx = -1;
+
+    for (int k = 0; k < candCount; k++) {
+        int i = cand[k] / SIZE, j = cand[k] % SIZE;
+
+        // Проверка мгновенной победы: первая найденная и есть ответ
+        if (move_wins(i, j, -1)) {
+            winIdx = cand[k];
+            break;
+        }
+
+        // Блокировка победы игрока: запоминаем первую, но ищем дальше возможную победу
+        if (blockIdx == -1 && move_wins(i, j, 1))
+            blockIdx = cand[k];
+        if (blockIdx != -1)
+            continue;
+
+        // Оценка позиций
+        // Атака
+        board[i][j] = -1;
+        int attackScore = evaluate_position(i, j, -1);
+        board[i][j] = 0;
+
+        // Защита
+        board[i][j] = 1;
+        int defendScore = evaluate_position(i, j, 1);
+        board[i][j] = 0;
+
+        // Бонус центра
+        int dist = abs(i - center) + abs(j - center);
+        int centerBonus = 20 - dist;
+
+        int totalScore =
+            attackScore * 2 +
+            defendScore +
+            centerBonus;
+
+        if (totalScore > bestScore) {
+            bestScore = totalScore;
+            bestX = i;
+            bestY = j;
         }
     }
 
-    // Блокировка победы игрока
-    for (int i = 0; i < SIZE; i++) {
-        for (int j = 0; j < SIZE; j++) {
-            if (board[i][j] == 0 && move_wins(i, j, 1)) {
-                place_bot_at(i, j);
-                return;
-            }
-        }
-    }
-
-    // Оценка позиций
-    for (int i = 0; i < SIZE; i++) {
-        for (int j = 0; j < SIZE; j++) {
-
-            if (board[i][j] != 0)
-                continue;
-
-            // Проверяем только клетки рядом с фишками
-            if (!has_neighbor(i, j, 2))
-                continue;
-
-            // Атака
-            board[i][j] = -1;
-            int attackScore = evaluate_position(i, j, -1);
-            board[i][j] = 0;
-
-            // Защита
-            board[i][j] = 1;
-            int defendScore = evaluate_position(i, j, 1);
-            board[i][j] = 0;
-
-            // Бонус центра
-            int dist = abs(i - center) + abs(j - center);
-            int centerBonus = 20 - dist;
-
-            int totalScore =
-                attackScore * 2 +
-                defendScore +
-                centerBonus;
-
-            if (totalScore > bestScore) {
-                bestScore = totalScore;
-                bestX = i;
-                bestY = j;
-            }
-        }
-    }
-
-    if (bestX != -1)
+    if (winIdx != -1)
+        place_bot_at(winIdx / SIZE, winIdx % SIZE);
+    else if (blockIdx != -1)
+        place_bot_at(blockIdx / SIZE, blockIdx % SIZE);
+    else if (bestX != -1)
         place_bot_at(bestX, bestY);
     else
         bot_medium();
@@ -391,7 +443,7 @@ void place_piece(int x, int y) {
     if (x < 0 || x >= SIZE || y < 0 || y >= SIZE) return;
     if (board[x][y] != 0) return;
 
-    board[x][y] = turn;
+    set_stone(x, y, turn);
 
     if (check_win(x, y, turn)) {
         winner = turn;
